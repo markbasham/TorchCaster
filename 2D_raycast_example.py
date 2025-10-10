@@ -40,22 +40,81 @@ vol_t = torch.from_numpy(volume)[None, None].to(device)  # (1, 1, D, H, W)
 
 print(f"Generated volume with {k} random Gaussians.")
 
+# Now sort out the camera
+def generate_camera_planes(
+    res_y, res_x,
+    fov=60.0,                     # field of view in degrees
+    aspect=1.0,                   # width/height ratio
+    distance=64.0,                # distance to far plane (volume depth)
+    perspective=1.0,              # 0 = orthographic, 1 = perspective
+    cam_origin=(0, 0, -32),       # camera position
+    cam_forward=(0, 0, 1),        # camera viewing direction
+    cam_up=(0, 1, 0),             # up vector
+    device="cpu"
+):
+    """
+    Generates start and end planes for ray marching through a 3D volume,
+    using a simple pinhole-style camera model.
+    """
+    cam_origin = torch.tensor(cam_origin, dtype=torch.float32, device=device)
+    forward = torch.tensor(cam_forward, dtype=torch.float32, device=device)
+    up = torch.tensor(cam_up, dtype=torch.float32, device=device)
+
+    # Normalize orientation vectors
+    forward = forward / torch.norm(forward)
+    right = torch.cross(forward, up)
+    right = right / torch.norm(right)
+    up = torch.cross(right, forward)
+    up = up / torch.norm(up)
+
+    # Image plane setup
+    fov_rad = np.deg2rad(fov)
+    half_height = torch.tan(torch.tensor(fov_rad / 2, device=device))
+    half_width = aspect * half_height
+
+    # Create 2D grid of pixel coordinates in NDC [-1, 1]
+    v = torch.linspace(-1, 1, res_y, device=device).view(res_y, 1)
+    u = torch.linspace(-1, 1, res_x, device=device).view(1, res_x)
+    uu, vv = torch.meshgrid(u[0], v[:, 0], indexing='xy')  # (res_y, res_x)
+
+    # Project to camera space
+    ray_dir = (
+        forward[None, None, :] +
+        uu[..., None] * half_width * right[None, None, :] +
+        vv[..., None] * half_height * up[None, None, :]
+    )
+    ray_dir = ray_dir / torch.norm(ray_dir, dim=-1, keepdim=True)
+
+    # Start plane = near plane at camera origin
+    start_plane = cam_origin[None, None, :].expand(res_y, res_x, 3)
+
+    # End plane = point along ray direction at given distance
+    end_plane = start_plane + ray_dir * distance
+
+    # Perspective control (lerp toward parallel rays if perspective < 1)
+    if perspective < 1.0:
+        # Orthographic equivalent direction (just camera forward)
+        ortho_end = start_plane + forward[None, None, :] * distance
+        end_plane = torch.lerp(ortho_end, end_plane, perspective)
+
+    return start_plane, end_plane
+
 # --- Define two 2D planes (start and end) ---
 # Start plane at z=0, End plane at z=D-1
 # We'll make a square grid across y and x
 
-po = 32               # perspective offset for the simple setup
+#po = 32               # perspective offset for the simple setup
 
 # Define start and end corners
-start_top_left  = np.array([0, po ,  po], dtype=np.float32)
-start_top_right = np.array([0,  H-po, po], dtype=np.float32)
-start_bottom_left  = np.array([0, po, W-po], dtype=np.float32)
-start_bottom_right = np.array([0, H-po, W-po], dtype=np.float32)
+#start_top_left  = np.array([0, po ,  po], dtype=np.float32)
+#start_top_right = np.array([0,  H-po, po], dtype=np.float32)
+#start_bottom_left  = np.array([0, po, W-po], dtype=np.float32)
+#start_bottom_right = np.array([0, H-po, W-po], dtype=np.float32)
 
-end_top_left  = np.array([D-1, 0, 0], dtype=np.float32)
-end_top_right = np.array([D-1, H-1, 0], dtype=np.float32)
-end_bottom_left  = np.array([D-1, 0, W-1], dtype=np.float32)
-end_bottom_right = np.array([D-1, H-1, W-1], dtype=np.float32)
+#end_top_left  = np.array([D-1, 0, 0], dtype=np.float32)
+#end_top_right = np.array([D-1, H-1, 0], dtype=np.float32)
+#end_bottom_left  = np.array([D-1, 0, W-1], dtype=np.float32)
+#end_bottom_right = np.array([D-1, H-1, W-1], dtype=np.float32)
 
 
 m_y, m_x = 512, 512   # number of rays in y and x directions
@@ -64,21 +123,34 @@ n = 256               # number of samples per ray
 
 # --- Interpolate start and end planes ---
 # Each will be shape (m_y, m_x, 3)
-def bilinear_grid(top_left, top_right, bottom_left, bottom_right, m_y, m_x):
-    v = torch.linspace(0, 1, m_y).view(m_y, 1, 1)
-    u = torch.linspace(0, 1, m_x).view(1, m_x, 1)
-    top = torch.tensor(top_left) + (torch.tensor(top_right) - torch.tensor(top_left)) * u
-    bottom = torch.tensor(bottom_left) + (torch.tensor(bottom_right) - torch.tensor(bottom_left)) * u
-    return top + (bottom - top) * v
+#def bilinear_grid(top_left, top_right, bottom_left, bottom_right, m_y, m_x):
+#    v = torch.linspace(0, 1, m_y).view(m_y, 1, 1)
+#    u = torch.linspace(0, 1, m_x).view(1, m_x, 1)
+#    top = torch.tensor(top_left) + (torch.tensor(top_right) - torch.tensor(top_left)) * u
+#    bottom = torch.tensor(bottom_left) + (torch.tensor(bottom_right) - torch.tensor(bottom_left)) * u
+#    return top + (bottom - top) * v#
 
-start_plane = bilinear_grid(start_top_left, start_top_right, start_bottom_left, start_bottom_right, m_y, m_x)
-end_plane   = bilinear_grid(end_top_left,   end_top_right,   end_bottom_left,   end_bottom_right,   m_y, m_x)
+#start_plane = bilinear_grid(start_top_left, start_top_right, start_bottom_left, start_bottom_right, m_y, m_x)
+#end_plane   = bilinear_grid(end_top_left,   end_top_right,   end_bottom_left,   end_bottom_right,   m_y, m_x)
 
-start_plane.to(device)
-end_plane.to(device)
+#start_plane.to(device)
+#end_plane.to(device)
+
+start_plane, end_plane = generate_camera_planes(
+    res_y=m_y,
+    res_x=m_x,
+    fov=256.0,              # degrees
+    aspect=m_x / m_y,
+    distance=64.0,         # matches your volume depth
+    perspective=1.0,       # 1.0 = full perspective, 0.0 = orthographic
+    cam_origin=(128, 128, 0),
+    cam_forward=(0, 0, 1),
+    cam_up=(0, 1, 0),
+    device=device
+)
 
 # --- Build rays and sample points ---
-t = torch.linspace(0, 1, n).view(1, 1, n, 1)  # (1,1,n,1)
+t = torch.linspace(0, 1, n).view(1, 1, n, 1).to(device)  # (1,1,n,1)
 starts = start_plane[:, :, None, :]  # (m_y, m_x, 1, 3)
 ends   = end_plane[:, :, None, :]    # (m_y, m_x, 1, 3)
 coords = starts + (ends - starts) * t  # (m_y, m_x, n, 3)
