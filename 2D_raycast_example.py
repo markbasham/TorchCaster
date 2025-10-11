@@ -11,7 +11,7 @@ print("Using device:", device)
 
 # --- Create a 3D volume with k random Gaussians ---
 D, H, W = 256, 256, 256
-k = 10  # number of random Gaussians
+k = 25 # number of random Gaussians
 
 z, y, x = np.meshgrid(
     np.linspace(-1, 1, D),
@@ -43,41 +43,49 @@ print(f"Generated volume with {k} random Gaussians.")
 # Now sort out the camera
 def generate_camera_planes(
     res_y, res_x,
-    fov=60.0,                     # field of view in degrees
-    aspect=1.0,                   # width/height ratio
-    distance=64.0,                # distance to far plane (volume depth)
+    fov=60.0,                     # field of view in degrees (vertical)
+    aspect=1.0,                   # width / height
+    distance=64.0,                # distance between start and end planes
     perspective=1.0,              # 0 = orthographic, 1 = perspective
     cam_origin=(0, 0, -32),       # camera position
-    cam_forward=(0, 0, 1),        # camera viewing direction
-    cam_up=(0, 1, 0),             # up vector
+    look_at=(0, 0, 0),            # point camera looks at
+    cam_up=(0, 1, 0),             # world up direction
     device="cpu"
 ):
     """
     Generates start and end planes for ray marching through a 3D volume,
-    using a simple pinhole-style camera model.
+    using a pure look-at camera model.
+
+    Returns
+    -------
+    start_plane, end_plane : torch.Tensor
+        Each of shape (res_y, res_x, 3)
     """
+
     cam_origin = torch.tensor(cam_origin, dtype=torch.float32, device=device)
-    forward = torch.tensor(cam_forward, dtype=torch.float32, device=device)
+    look_at = torch.tensor(look_at, dtype=torch.float32, device=device)
     up = torch.tensor(cam_up, dtype=torch.float32, device=device)
 
-    # Normalize orientation vectors
+    # --- Compute camera basis vectors ---
+    forward = look_at - cam_origin
     forward = forward / torch.norm(forward)
+
     right = torch.cross(forward, up)
     right = right / torch.norm(right)
     up = torch.cross(right, forward)
     up = up / torch.norm(up)
 
-    # Image plane setup
+    # --- Compute camera frustum ---
     fov_rad = np.deg2rad(fov)
     half_height = torch.tan(torch.tensor(fov_rad / 2, device=device))
     half_width = aspect * half_height
 
-    # Create 2D grid of pixel coordinates in NDC [-1, 1]
-    v = torch.linspace(-1, 1, res_y, device=device).view(res_y, 1)
-    u = torch.linspace(-1, 1, res_x, device=device).view(1, res_x)
-    uu, vv = torch.meshgrid(u[0], v[:, 0], indexing='xy')  # (res_y, res_x)
+    # --- Normalized device coordinates (NDC) grid in [-1, 1] ---
+    v = torch.linspace(-1, 1, res_y, device=device)
+    u = torch.linspace(-1, 1, res_x, device=device)
+    uu, vv = torch.meshgrid(u, v, indexing='xy')  # (res_x, res_y)
 
-    # Project to camera space
+    # --- Ray directions (normalized) ---
     ray_dir = (
         forward[None, None, :] +
         uu[..., None] * half_width * right[None, None, :] +
@@ -85,15 +93,12 @@ def generate_camera_planes(
     )
     ray_dir = ray_dir / torch.norm(ray_dir, dim=-1, keepdim=True)
 
-    # Start plane = near plane at camera origin
+    # --- Generate planes ---
     start_plane = cam_origin[None, None, :].expand(res_y, res_x, 3)
-
-    # End plane = point along ray direction at given distance
     end_plane = start_plane + ray_dir * distance
 
-    # Perspective control (lerp toward parallel rays if perspective < 1)
+    # --- Optional: blend toward orthographic projection ---
     if perspective < 1.0:
-        # Orthographic equivalent direction (just camera forward)
         ortho_end = start_plane + forward[None, None, :] * distance
         end_plane = torch.lerp(ortho_end, end_plane, perspective)
 
@@ -103,7 +108,7 @@ m_y, m_x = 512, 512   # number of rays in y and x directions
 n = 256               # number of samples per ray
 
 # Add an animation loop
-for i in range(0,100, 5):
+for i in range(0,300, 5):
 
     start_plane, end_plane = generate_camera_planes(
         res_y=m_y,
@@ -113,7 +118,7 @@ for i in range(0,100, 5):
         distance=150.0,         # matches your volume depth
         perspective=1.0,       # 1.0 = full perspective, 0.0 = orthographic
         cam_origin=(128, 128, i), # Set to move forward through the volume
-        cam_forward=(0, 0, 1),
+        look_at=(256, 256, 256),
         cam_up=(0, 1, 0),
         device=device
     )
