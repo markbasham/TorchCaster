@@ -99,147 +99,93 @@ def generate_camera_planes(
 
     return start_plane, end_plane
 
-# --- Define two 2D planes (start and end) ---
-# Start plane at z=0, End plane at z=D-1
-# We'll make a square grid across y and x
-
-#po = 32               # perspective offset for the simple setup
-
-# Define start and end corners
-#start_top_left  = np.array([0, po ,  po], dtype=np.float32)
-#start_top_right = np.array([0,  H-po, po], dtype=np.float32)
-#start_bottom_left  = np.array([0, po, W-po], dtype=np.float32)
-#start_bottom_right = np.array([0, H-po, W-po], dtype=np.float32)
-
-#end_top_left  = np.array([D-1, 0, 0], dtype=np.float32)
-#end_top_right = np.array([D-1, H-1, 0], dtype=np.float32)
-#end_bottom_left  = np.array([D-1, 0, W-1], dtype=np.float32)
-#end_bottom_right = np.array([D-1, H-1, W-1], dtype=np.float32)
-
-
 m_y, m_x = 512, 512   # number of rays in y and x directions
 n = 256               # number of samples per ray
 
+# Add an animation loop
+for i in range(0,100, 5):
 
-# --- Interpolate start and end planes ---
-# Each will be shape (m_y, m_x, 3)
-#def bilinear_grid(top_left, top_right, bottom_left, bottom_right, m_y, m_x):
-#    v = torch.linspace(0, 1, m_y).view(m_y, 1, 1)
-#    u = torch.linspace(0, 1, m_x).view(1, m_x, 1)
-#    top = torch.tensor(top_left) + (torch.tensor(top_right) - torch.tensor(top_left)) * u
-#    bottom = torch.tensor(bottom_left) + (torch.tensor(bottom_right) - torch.tensor(bottom_left)) * u
-#    return top + (bottom - top) * v#
+    start_plane, end_plane = generate_camera_planes(
+        res_y=m_y,
+        res_x=m_x,
+        fov=256.0,              # degrees
+        aspect=m_x / m_y,
+        distance=150.0,         # matches your volume depth
+        perspective=1.0,       # 1.0 = full perspective, 0.0 = orthographic
+        cam_origin=(128, 128, i), # Set to move forward through the volume
+        cam_forward=(0, 0, 1),
+        cam_up=(0, 1, 0),
+        device=device
+    )
 
-#start_plane = bilinear_grid(start_top_left, start_top_right, start_bottom_left, start_bottom_right, m_y, m_x)
-#end_plane   = bilinear_grid(end_top_left,   end_top_right,   end_bottom_left,   end_bottom_right,   m_y, m_x)
+    # --- Build rays and sample points ---
+    t = torch.linspace(0, 1, n).view(1, 1, n, 1).to(device)  # (1,1,n,1)
+    starts = start_plane[:, :, None, :]  # (m_y, m_x, 1, 3)
+    ends   = end_plane[:, :, None, :]    # (m_y, m_x, 1, 3)
+    coords = starts + (ends - starts) * t  # (m_y, m_x, n, 3)
 
-#start_plane.to(device)
-#end_plane.to(device)
+    # --- Normalize to [-1, 1] ---
+    coords_norm = torch.zeros_like(coords).to(device)
+    coords_norm[..., 0] = 2.0 * coords[..., 2] / (W - 1) - 1.0  # x
+    coords_norm[..., 1] = 2.0 * coords[..., 1] / (H - 1) - 1.0  # y
+    coords_norm[..., 2] = 2.0 * coords[..., 0] / (D - 1) - 1.0  # z
 
-start_plane, end_plane = generate_camera_planes(
-    res_y=m_y,
-    res_x=m_x,
-    fov=256.0,              # degrees
-    aspect=m_x / m_y,
-    distance=64.0,         # matches your volume depth
-    perspective=1.0,       # 1.0 = full perspective, 0.0 = orthographic
-    cam_origin=(128, 128, 0),
-    cam_forward=(0, 0, 1),
-    cam_up=(0, 1, 0),
-    device=device
-)
+    # --- Reshape to feed grid_sample ---
+    # Combine the m_y * m_x rays into one batch
+    M = m_y * m_x
+    grid = coords_norm.view(M, 1, 1, n, 3).to(device)
+    print('grid shape', grid.shape)
+    samples = F.grid_sample(
+        vol_t.expand(M, -1, -1, -1, -1),
+        grid,
+        mode='bilinear',
+        align_corners=True,
+    )
+    print('samples shape', samples.shape)
+    samples = samples.view(m_y, m_x, n)
 
-# --- Build rays and sample points ---
-t = torch.linspace(0, 1, n).view(1, 1, n, 1).to(device)  # (1,1,n,1)
-starts = start_plane[:, :, None, :]  # (m_y, m_x, 1, 3)
-ends   = end_plane[:, :, None, :]    # (m_y, m_x, 1, 3)
-coords = starts + (ends - starts) * t  # (m_y, m_x, n, 3)
+    print('samples shape', samples.shape)
 
-# --- Normalize to [-1, 1] ---
-coords_norm = torch.zeros_like(coords).to(device)
-coords_norm[..., 0] = 2.0 * coords[..., 2] / (W - 1) - 1.0  # x
-coords_norm[..., 1] = 2.0 * coords[..., 1] / (H - 1) - 1.0  # y
-coords_norm[..., 2] = 2.0 * coords[..., 0] / (D - 1) - 1.0  # z
+    # --- Normalize to [0, 1] for colormap lookup ---
+    samples_min, samples_max = samples.min(), samples.max()
+    samples_norm = (samples - samples_min) / (samples_max - samples_min + 1e-8)
 
-# --- Reshape to feed grid_sample ---
-# Combine the m_y * m_x rays into one batch
-M = m_y * m_x
-grid = coords_norm.view(M, 1, 1, n, 3).to(device)
-print('grid shape', grid.shape)
-samples = F.grid_sample(
-    vol_t.expand(M, -1, -1, -1, -1),
-    grid,
-    mode='bilinear',
-    align_corners=True,
-)
-print('samples shape', samples.shape)
-samples = samples.view(m_y, m_x, n)
+    # --- Create viridis colormap as a tensor ---
+    viridis = matplotlib.cm.get_cmap('viridis', 256)
+    cmap_array = torch.tensor(viridis(np.linspace(0, 1, 256)), dtype=torch.float32, device=device)  # (256, 4)
 
-print('samples shape', samples.shape)
+    # --- Map normalized samples to RGBA using lookup ---
+    idx = (samples_norm * 255).long().clamp(0, 255)
+    rgba = cmap_array[idx]  # (x, y, n, 4)
 
-# --- Normalize to [0, 1] for colormap lookup ---
-samples_min, samples_max = samples.min(), samples.max()
-samples_norm = (samples - samples_min) / (samples_max - samples_min + 1e-8)
+    # --- Replace the alpha channel with the raw (normalized) intensity ---
+    rgba[..., 3] = samples
 
-# --- Create viridis colormap as a tensor ---
-viridis = matplotlib.cm.get_cmap('viridis', 256)
-cmap_array = torch.tensor(viridis(np.linspace(0, 1, 256)), dtype=torch.float32, device=device)  # (256, 4)
+    samples_rgba = rgba.detach().cpu().numpy()  # shape (x, y, n, 4)
+    print("Sample volume RGBA shape:", samples_rgba.shape)  # (m_y, m_x, n)
 
-# --- Map normalized samples to RGBA using lookup ---
-idx = (samples_norm * 255).long().clamp(0, 255)
-rgba = cmap_array[idx]  # (x, y, n, 4)
+    samples = samples.detach().cpu().numpy()
+    print("Sample volume shape:", samples.shape)  # (m_y, m_x, n)
 
-# --- Replace the alpha channel with the raw (normalized) intensity ---
-rgba[..., 3] = samples
+    # --- Save a visualization ---
+    # Make a projection
+    projection = samples.sum(axis=-1)  # shape (m_y, m_x)
 
-samples_rgba = rgba.detach().cpu().numpy()  # shape (x, y, n, 4)
-print("Sample volume RGBA shape:", samples_rgba.shape)  # (m_y, m_x, n)
+    from PIL import Image
 
-samples = samples.detach().cpu().numpy()
-print("Sample volume shape:", samples.shape)  # (m_y, m_x, n)
+    # --- Save an RGBA visualization ---
+    # Make a projection
+    projection = samples_rgba.sum(axis=2)  # shape (m_y, m_x)
 
-# --- Save a visualization ---
-# Make a projection
-projection = samples.sum(axis=-1)  # shape (m_y, m_x)
+    # projection is 3d NumPy array, e.g. shape (m_y, m_x)
+    # First, normalize to 0–255 range for 8-bit image output
+    proj = projection - projection.min()
+    proj = proj / proj.max()
+    proj = (proj * 255).astype(np.uint8)
 
-plt.figure(figsize=(20,20))
-plt.imshow(projection, cmap='viridis', origin='lower')
-plt.colorbar(label="Sampled Intensity (mid-depth)")
-plt.title("2D Grid of Rays Sampling Mid-Depth Values")
-plt.xlabel("x-ray index")
-plt.ylabel("y-ray index")
-plt.tight_layout()
-plt.savefig("samples_grid_middepth.png", dpi=200)
-print("Saved 2D ray-grid visualization to samples_grid_middepth.png")
+    # Create and save colour image
+    #img = Image.fromarray(proj, mode="L")  # "L" = 8-bit grayscale
+    img = Image.fromarray(proj, mode="RGBA")
+    img.save(f"projection_direct_rgb_{i:02d}.png")
 
-from PIL import Image
-
-# projection is your 2D NumPy array, e.g. shape (m_y, m_x)
-# First, normalize to 0–255 range for 8-bit image output
-proj = projection - projection.min()
-proj = proj / proj.max()
-proj = (proj * 255).astype(np.uint8)
-
-# Create and save grayscale image
-#img = Image.fromarray(proj, mode="L")  # "L" = 8-bit grayscale
-img = Image.fromarray(np.stack([proj]*3, axis=-1), mode="RGB")
-img.save("projection_direct.png")
-
-print("Saved grayscale projection image to projection_direct.png")
-
-# --- Save an RGBA visualization ---
-# Make a projection
-projection = samples_rgba.sum(axis=2)  # shape (m_y, m_x)
-
-# projection is 3d NumPy array, e.g. shape (m_y, m_x)
-# First, normalize to 0–255 range for 8-bit image output
-proj = projection - projection.min()
-proj = proj / proj.max()
-proj = (proj * 255).astype(np.uint8)
-
-# Create and save colour image
-#img = Image.fromarray(proj, mode="L")  # "L" = 8-bit grayscale
-img = Image.fromarray(proj, mode="RGBA")
-img.save("projection_direct_rgb.png")
-
-print("Saved grayscale projection image to projection_direct_rgb.png")
+    print("Saved Colour projection image to projection_direct_rgb.png")
