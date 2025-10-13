@@ -14,7 +14,7 @@ print("Using device:", device)
 import h5py as h5
 
 data_file = h5.File('./TorchCaster/data/PDHG_TV_1000_SpCh_alpha_0.003_beta_0.5.nxs')
-volume = data_file['/entry1/tomo_entry/data/data'][1,:,:,:]*100.0
+volume = data_file['/entry1/tomo_entry/data/data'][5,:,:,:]*100.0
 
 
 # # --- Create a 3D volume with k random Gaussians ---
@@ -116,7 +116,7 @@ m_y, m_x = 256, 256   # number of rays in y and x directions
 n = 160               # number of samples per ray
 
 # Add an animation loop
-for i in range(0,40, 5):
+for i in range(0,80, 5):
 
     start_plane, end_plane = generate_camera_planes(
         res_y=m_y,
@@ -125,8 +125,8 @@ for i in range(0,40, 5):
         aspect=m_x / m_y,
         distance=80.0,         # matches your volume depth
         perspective=1.0,       # 1.0 = full perspective, 0.0 = orthographic
-        cam_origin=(40, 40, i), # Set to move forward through the volume
-        look_at=(80, 80, 80),
+        cam_origin=(i, 40, 0), # Set to move forward through the volume
+        look_at=(40, 40, 40),
         cam_up=(0, 1, 0),
         device=device
     )
@@ -157,7 +157,13 @@ for i in range(0,40, 5):
     print('samples shape', samples.shape)
     samples = samples.view(m_y, m_x, n)
 
+    samples[samples<3.0] = 3.0
+    samples[samples>10.0] = 10.0
+    
+    
+
     print('samples shape', samples.shape)
+    print('Samples min max', samples.min(), samples.max())
 
     # --- Normalize to [0, 1] for colormap lookup ---
     samples_min, samples_max = samples.min(), samples.max()
