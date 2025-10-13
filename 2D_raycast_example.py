@@ -6,39 +6,47 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 # Select your target GPU (0-indexed)
-device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+device = "cpu"
 print("Using device:", device)
 
-# --- Create a 3D volume with k random Gaussians ---
-D, H, W = 256, 256, 256
-k = 25 # number of random Gaussians
+# Load a dataset from hdf5
+import h5py as h5
 
-z, y, x = np.meshgrid(
-    np.linspace(-1, 1, D),
-    np.linspace(-1, 1, H),
-    np.linspace(-1, 1, W),
-    indexing='ij'
-)
+data_file = h5.File('./TorchCaster/data/PDHG_TV_1000_SpCh_alpha_0.003_beta_0.5.nxs')
+volume = data_file['/entry1/tomo_entry/data/data'][1,:,:,:]*100.0
 
-volume = np.zeros((D, H, W), dtype=np.float32)
 
-for i in range(k):
-    # Random center in normalized coordinates (-1 to 1)
-    cx, cy, cz = np.random.uniform(-0.8, 0.8, 3)
+# # --- Create a 3D volume with k random Gaussians ---
+D, H, W = volume.shape
+# k = 25 # number of random Gaussians
+
+# z, y, x = np.meshgrid(
+#     np.linspace(-1, 1, D),
+#     np.linspace(-1, 1, H),
+#     np.linspace(-1, 1, W),
+#     indexing='ij'
+# )
+
+# volume = np.zeros((D, H, W), dtype=np.float32)
+
+# for i in range(k):
+#     # Random center in normalized coordinates (-1 to 1)
+#     cx, cy, cz = np.random.uniform(-0.8, 0.8, 3)
     
-    # Random width (smaller = sharper Gaussian)
-    sigma = np.random.uniform(0.15, 0.4)
+#     # Random width (smaller = sharper Gaussian)
+#     sigma = np.random.uniform(0.15, 0.4)
     
-    # Random amplitude (brightness)
-    amplitude = np.random.uniform(0.5, 1.0)
+#     # Random amplitude (brightness)
+#     amplitude = np.random.uniform(0.5, 1.0)
     
-    # Compute Gaussian and add it to the volume
-    g = amplitude * np.exp(-((x - cx)**2 + (y - cy)**2 + (z - cz)**2) / (2 * sigma**2))
-    volume += g.astype(np.float32)
+#     # Compute Gaussian and add it to the volume
+#     g = amplitude * np.exp(-((x - cx)**2 + (y - cy)**2 + (z - cz)**2) / (2 * sigma**2))
+#     volume += g.astype(np.float32)
 
 vol_t = torch.from_numpy(volume)[None, None].to(device)  # (1, 1, D, H, W)
 
-print(f"Generated volume with {k} random Gaussians.")
+# print(f"Generated volume with {k} random Gaussians.")
 
 # Now sort out the camera
 def generate_camera_planes(
@@ -104,21 +112,21 @@ def generate_camera_planes(
 
     return start_plane, end_plane
 
-m_y, m_x = 512, 512   # number of rays in y and x directions
-n = 256               # number of samples per ray
+m_y, m_x = 256, 256   # number of rays in y and x directions
+n = 160               # number of samples per ray
 
 # Add an animation loop
-for i in range(0,300, 5):
+for i in range(0,40, 5):
 
     start_plane, end_plane = generate_camera_planes(
         res_y=m_y,
         res_x=m_x,
-        fov=256.0,              # degrees
+        fov=90.0,              # degrees
         aspect=m_x / m_y,
-        distance=150.0,         # matches your volume depth
+        distance=80.0,         # matches your volume depth
         perspective=1.0,       # 1.0 = full perspective, 0.0 = orthographic
-        cam_origin=(128, 128, i), # Set to move forward through the volume
-        look_at=(256, 256, 256),
+        cam_origin=(40, 40, i), # Set to move forward through the volume
+        look_at=(80, 80, 80),
         cam_up=(0, 1, 0),
         device=device
     )
@@ -187,6 +195,8 @@ for i in range(0,300, 5):
     proj = projection - projection.min()
     proj = proj / proj.max()
     proj = (proj * 255).astype(np.uint8)
+
+    proj[..., 3] = proj[..., 3]
 
     # Create and save colour image
     #img = Image.fromarray(proj, mode="L")  # "L" = 8-bit grayscale
