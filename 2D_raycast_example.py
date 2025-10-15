@@ -113,6 +113,75 @@ def generate_camera_planes(
     return start_plane, end_plane
 
 
+def composite_with_early_stop_vectorized(rgba: torch.Tensor, bg_color=(0.0, 0.0, 0.0), eps=1e-10):
+    """
+    Vectorized front-to-back compositing with early-stop per-ray and background fill.
+    Inputs:
+      - rgba: (H, W, N, 4) tensor, values in [0,1], on desired device
+      - bg_color: tuple of 3 floats
+    Returns:
+      - composited: (H, W, 4) tensor (RGB, alpha)
+    """
+    assert rgba.ndim == 4 and rgba.shape[-1] == 4
+    device = rgba.device
+    dtype = rgba.dtype
+
+    rgb = rgba[..., :3]          # (H, W, N, 3)
+    alpha = rgba[..., 3]         # (H, W, N)
+
+    H, W, N = alpha.shape
+
+    # 1) compute one_minus_alpha and cumulative products
+    one_minus_alpha = 1.0 - alpha               # (H, W, N)
+    cumprod_all = torch.cumprod(one_minus_alpha + eps, dim=-1)  # \prod_{j<=i}(1-a_j)
+
+    # 2) cumulative alpha up to and including i: A_i = 1 - prod_{j<=i}(1-a_j)
+    cum_alpha = 1.0 - cumprod_all               # (H, W, N)
+
+    # 3) transmittance before sample i: T_i = prod_{j<i}(1-a_j)
+    #    compute by shifting cumprod_right and setting T_0 = 1
+    T = torch.roll(cumprod_all, shifts=1, dims=-1)   # shifted right: prod_{j<i}(1-a_j)
+    T[..., 0] = 1.0
+
+    # 4) weights = alpha * T
+    weights = alpha * T                # (H, W, N)
+
+    # 5) find first index per ray where cum_alpha >= 1 (i.e. reached full opacity)
+    reached = cum_alpha >= (1.0 - 1e-6)    # boolean (H, W, N)
+
+    # any_reached: (H,W) True if some index reached full opacity
+    any_reached = reached.any(dim=-1)      # (H, W) bool
+
+    # first_index: argmax gives first True index if any True, but returns 0 if none True.
+    first_idx = torch.argmax(reached.to(dtype=torch.int64), dim=-1)  # (H, W), int64
+
+    # For rays that never reached full opacity, set first_idx = N-1 (keep all samples)
+    first_idx = torch.where(any_reached, first_idx, torch.full_like(first_idx, N - 1))
+
+    # 6) build mask of allowed sample indices per ray: idx <= first_idx
+    idxs = torch.arange(N, device=device, dtype=first_idx.dtype).view(1, 1, N)  # (1,1,N)
+    # expand first_idx to (H, W, 1) for broadcasting
+    mask = idxs <= first_idx.view(H, W, 1)    # boolean mask (H, W, N)
+
+    # 7) apply mask to weights (zero out weights after first opaque sample)
+    weights = weights * mask.to(dtype=dtype)  # (H, W, N)
+
+    # 8) composite rgb and alpha
+    comp_rgb = torch.sum(weights[..., None] * rgb, dim=-2)   # (H, W, 3)
+    comp_alpha = 1.0 - torch.prod(one_minus_alpha + eps, dim=-1, keepdim=True)  # (H, W, 1)
+
+    # Note: comp_alpha currently is final alpha for full ray (same as 1-prod). But since
+    # we masked weights after the first-saturating sample, comp_rgb corresponds to early-stopped color.
+    # For rays where first_idx < N-1, comp_alpha should be clamped to 1.0 in practice:
+    comp_alpha = torch.clamp(comp_alpha, 0.0, 1.0)
+
+    # 9) blend with background for rays that remain translucent
+    bg = torch.tensor(bg_color, device=device, dtype=dtype).view(1, 1, 3)
+    comp_rgb = comp_rgb + (1.0 - comp_alpha) * bg      # (H, W, 3)
+
+    return comp_rgb   # (H, W, 3)
+
+
 def composite_front_to_back_cumulative(rgba: torch.Tensor, bg_color=(0, 0, 0)) -> torch.Tensor:
     """
     Front-to-back compositing with early opacity stop and background fill.
@@ -271,7 +340,7 @@ for i in range(0,80, 5):
     img.save(f"projection_direct_rgb_{i:02d}.png")
 
     print("Saved Colour projection image to projection_direct_rgb.png")
-    final_img = composite_front_to_back_cumulative(rgba)
+    final_img = composite_with_early_stop_vectorized(rgba)
 
     final_img = final_img[...].clamp(0, 1).detach().cpu().numpy()
     final_img = (final_img * 255).astype(np.uint8)
