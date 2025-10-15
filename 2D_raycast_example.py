@@ -6,14 +6,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 # Select your target GPU (0-indexed)
-# device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
-device = "cpu"
+device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+#device = "cpu"
 print("Using device:", device)
 
 # Load a dataset from hdf5
 import h5py as h5
 
-data_file = h5.File('./TorchCaster/data/PDHG_TV_1000_SpCh_alpha_0.003_beta_0.5.nxs')
+data_file = h5.File('./TorchCaster/data/PDHG_TV_1000_Sp_alpha_0.004.nxs')
 volume = data_file['/entry1/tomo_entry/data/data'][5,:,:,:]*100.0
 
 
@@ -112,8 +112,8 @@ def generate_camera_planes(
 
     return start_plane, end_plane
 
-m_y, m_x = 256, 256   # number of rays in y and x directions
-n = 160               # number of samples per ray
+m_y, m_x = 512, 512   # number of rays in y and x directions
+n = 256               # number of samples per ray
 
 # Add an animation loop
 for i in range(0,80, 5):
@@ -121,11 +121,11 @@ for i in range(0,80, 5):
     start_plane, end_plane = generate_camera_planes(
         res_y=m_y,
         res_x=m_x,
-        fov=90.0,              # degrees
+        fov=60.0,              # degrees
         aspect=m_x / m_y,
-        distance=80.0,         # matches your volume depth
+        distance=256.0,         # matches your volume depth
         perspective=1.0,       # 1.0 = full perspective, 0.0 = orthographic
-        cam_origin=(i, 40, 0), # Set to move forward through the volume
+        cam_origin=(i, 40, -80), # Set to move forward through the volume
         look_at=(40, 40, 40),
         cam_up=(0, 1, 0),
         device=device
