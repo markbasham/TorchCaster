@@ -14,7 +14,7 @@ print("Using device:", device)
 import h5py as h5
 
 data_file = h5.File('./TorchCaster/data/PDHG_TV_1000_Sp_alpha_0.004.nxs')
-volume = data_file['/entry1/tomo_entry/data/data'][5,:,:,:]*100.0
+volume = data_file['/entry1/tomo_entry/data/data'][8,:,:,:]*100.0
 
 
 # # --- Create a 3D volume with k random Gaussians ---
@@ -112,6 +112,60 @@ def generate_camera_planes(
 
     return start_plane, end_plane
 
+
+def composite_front_to_back_cumulative(rgba: torch.Tensor, bg_color=(0, 0, 0)) -> torch.Tensor:
+    """
+    Front-to-back compositing with early opacity stop and background fill.
+
+    Parameters
+    ----------
+    rgba : torch.Tensor
+        Tensor of shape (H, W, N, 4) with RGB and A ∈ [0, 1].
+    bg_color : tuple of 3 floats
+        RGB background color (default black).
+
+    Returns
+    -------
+    torch.Tensor
+        Composited image of shape (H, W, 4) with RGB and A ∈ [0, 1].
+    """
+
+    assert rgba.ndim == 4 and rgba.shape[-1] == 4, "Expected (H, W, N, 4)"
+    device = rgba.device
+    dtype = rgba.dtype
+
+    rgb = rgba[..., :3]       # (H, W, N, 3)
+    alpha = rgba[..., 3:]     # (H, W, N, 1)
+
+    H, W, N, _ = rgba.shape
+
+    #print('rgb details', rgba, rgba.shape )
+    #print('alpha details', rgba, rgba.shape )
+
+    # Initialize accumulators
+    acc_rgb = torch.zeros((H, W, 3), dtype=dtype, device=device)
+    acc_alpha = torch.zeros((H, W, 1), dtype=dtype, device=device)
+
+    # Early-stop compositing
+    for i in range(N):
+        a = alpha[..., i, :]             # (H, W, 1)
+        c = rgb[..., i, :]               # (H, W, 3)
+
+        # Only update where not yet fully opaque
+        mask = (acc_alpha < 0.999).float()  # 1 where still translucent
+        acc_rgb += mask * (1.0 - acc_alpha) * a * c
+        acc_alpha += mask * (1.0 - acc_alpha) * a
+
+        # Optional micro-optimization: break early if all rays opaque
+        if torch.all(acc_alpha >= 0.999):
+            break
+
+    # Blend with background color for incomplete rays
+    bg = torch.tensor(bg_color, dtype=dtype, device=device).view(1, 1, 3)
+    acc_rgb = acc_rgb + (1.0 - acc_alpha) * bg
+
+    return acc_rgb
+
 m_y, m_x = 512, 512   # number of rays in y and x directions
 n = 256               # number of samples per ray
 
@@ -157,8 +211,12 @@ for i in range(0,80, 5):
     print('samples shape', samples.shape)
     samples = samples.view(m_y, m_x, n)
 
-    samples[samples<3.0] = 3.0
-    samples[samples>10.0] = 10.0
+    # This does a proper cut of the bottom, including the alpha
+    min_cut = 2.0
+    max_cut = 5.0
+    samples = samples-min_cut
+    samples[samples<0.0] = 0.0
+    samples[samples>(max_cut-min_cut)] = (max_cut-min_cut)
     
     
 
@@ -166,19 +224,21 @@ for i in range(0,80, 5):
     print('Samples min max', samples.min(), samples.max())
 
     # --- Normalize to [0, 1] for colormap lookup ---
-    samples_min, samples_max = samples.min(), samples.max()
-    samples_norm = (samples - samples_min) / (samples_max - samples_min + 1e-8)
+    #samples_min, samples_max = samples.min(), samples.max()
+    samples_norm = (samples - 0) / ((max_cut-min_cut) + 1e-8)
 
     # --- Create viridis colormap as a tensor ---
     viridis = matplotlib.cm.get_cmap('viridis', 256)
     cmap_array = torch.tensor(viridis(np.linspace(0, 1, 256)), dtype=torch.float32, device=device)  # (256, 4)
+
+    #print('cmap array', cmap_array, cmap_array.shape)
 
     # --- Map normalized samples to RGBA using lookup ---
     idx = (samples_norm * 255).long().clamp(0, 255)
     rgba = cmap_array[idx]  # (x, y, n, 4)
 
     # --- Replace the alpha channel with the raw (normalized) intensity ---
-    rgba[..., 3] = samples
+    rgba[..., 3] = samples*0.05
 
     samples_rgba = rgba.detach().cpu().numpy()  # shape (x, y, n, 4)
     print("Sample volume RGBA shape:", samples_rgba.shape)  # (m_y, m_x, n)
@@ -188,8 +248,8 @@ for i in range(0,80, 5):
 
     # --- Save a visualization ---
     # Make a projection
-    projection = samples.sum(axis=-1)  # shape (m_y, m_x)
-
+    # projection = samples.sum(axis=-1)  # shape (m_y, m_x)
+    
     from PIL import Image
 
     # --- Save an RGBA visualization ---
@@ -202,11 +262,22 @@ for i in range(0,80, 5):
     proj = proj / proj.max()
     proj = (proj * 255).astype(np.uint8)
 
-    proj[..., 3] = proj[..., 3]
+    #proj[..., 3] = proj[..., 3]
 
     # Create and save colour image
     #img = Image.fromarray(proj, mode="L")  # "L" = 8-bit grayscale
     img = Image.fromarray(proj, mode="RGBA")
+
     img.save(f"projection_direct_rgb_{i:02d}.png")
+
+    print("Saved Colour projection image to projection_direct_rgb.png")
+    final_img = composite_front_to_back_cumulative(rgba)
+
+    final_img = final_img[...].clamp(0, 1).detach().cpu().numpy()
+    final_img = (final_img * 255).astype(np.uint8)
+
+    img2 = Image.fromarray(final_img, mode="RGB")
+    
+    img2.save(f"accumulated_direct_rgb_{i:02d}.png")
 
     print("Saved Colour projection image to projection_direct_rgb.png")
